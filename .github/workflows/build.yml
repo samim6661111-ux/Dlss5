@@ -44,18 +44,21 @@ jobs:
             # which platform.h includes BEFORE it declares OSMemory/kReadExecute.
             # Fix: drop that include everywhere and add it at the END of platform.h.
             PUI=$(find . -path '*source/PlatformUnifiedInterface/platform.h' | head -1 || true)
+            OAF=$(find . -name os_arch_features.h | head -1 || true)
             echo "platform.h: ${PUI:-NOT FOUND}"
+            echo "os_arch_features.h: ${OAF:-NOT FOUND}"
             echo "--- includers of os_arch_features.h:"
             grep -rn "os_arch_features.h" source common 2>/dev/null || true
-            if [ -n "$PUI" ]; then
+            if [ -n "$PUI" ] && [ -n "$OAF" ]; then
               grep -rl "os_arch_features.h" source common 2>/dev/null | while read -r H; do
                 case "$H" in */os_arch_features.h) continue;; esac
                 sed -i '/#include.*os_arch_features\.h/d' "$H"
               done
-              printf '\n#include "os_arch_features.h"\n' >> "$PUI"
+              # absolute path, so it always resolves
+              printf '\n#include "%s/%s"\n' "$PWD" "$OAF" >> "$PUI"
+              echo "--- os_arch_features.h (first 50 lines):"
+              sed -n '1,50p' "$OAF"
             fi
-            echo "--- os_arch_features.h (first 50 lines):"
-            sed -n '1,50p' "$(find . -name os_arch_features.h | head -1)" || true
 
             rm -rf "$RUNNER_TEMP/db"
             if cmake -S . -B "$RUNNER_TEMP/db" \
@@ -67,7 +70,7 @@ jobs:
               echo "OK: $D ($REV)"; OK=1; break
             else
               echo "failed: $D"
-              grep -m10 -B1 -A4 "error" "$LOG" || true
+              grep -m10 -E "error:|fatal error|CMake Error" "$LOG" || tail -n 20 "$LOG"
             fi
           done
           [ "$OK" = 1 ] || { echo "No Dobby revision built"; exit 1; }
