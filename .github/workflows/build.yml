@@ -19,107 +19,45 @@ jobs:
           GLSLC=$(find "$NDK/shader-tools" -name glslc -type f | head -1)
           GLSLC="$GLSLC" sh gen_spv.sh
 
-      - name: Try prebuilt Dobby (official release)
-        id: pre
+      # Dobby does not build for Android arm64 at any recent revision.
+      # And64InlineHook is a tiny arm64 inline-hook lib (1 .cpp file).
+      # We wrap it so code that does #include "dobby.h" + DobbyHook(...) still compiles.
+      - name: Hook library (And64InlineHook as dobby shim)
         run: |
-          mkdir -p dobby_pre && cd dobby_pre
-          if ! curl -fL --retry 3 -o d.tgz https://github.com/jmpews/Dobby/releases/download/latest/dobby-android-all.tar.gz; then
-            echo "no prebuilt release, will build from source"; exit 0
-          fi
-          tar xzf d.tgz || { echo "bad archive"; exit 0; }
-          find . -type f | head -50
-          RB="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readobj"
-          LIB=""
-          for F in $(find . -name 'libdobby.a'); do
-            if "$RB" --file-headers "$F" 2>/dev/null | grep -qi aarch64; then LIB="$F"; break; fi
-          done
-          HDR=$(find . -name dobby.h | head -1)
-          echo "lib=$LIB hdr=$HDR"
-          [ -n "$LIB" ] && [ -n "$HDR" ] || { echo "no usable arm64 lib"; exit 0; }
-          cd ..
+          git clone --depth 1 https://github.com/Rprop/And64InlineHook.git a64
           mkdir -p third_party_dobby/include
-          cp "dobby_pre/$LIB" third_party_dobby/libdobby.a
-          cp "dobby_pre/$HDR" third_party_dobby/include/dobby.h
-          cat > third_party_dobby/CMakeLists.txt <<'EOF'
-          foreach(T dobby dobby_static)
-            add_library(${T} STATIC IMPORTED GLOBAL)
-            set_target_properties(${T} PROPERTIES
-              IMPORTED_LOCATION "${CMAKE_CURRENT_LIST_DIR}/libdobby.a"
-              INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_LIST_DIR}/include")
-          endforeach()
+          cp a64/And64InlineHook.cpp a64/And64InlineHook.hpp third_party_dobby/
+
+          cat > third_party_dobby/include/dobby.h <<'EOF'
+          #pragma once
+          #include <dlfcn.h>
+          #include <stdint.h>
+          extern "C" void A64HookFunction(void *const symbol, void *const replace, void **result);
+          typedef void (*dobby_dummy_func_t)(void);
+
+          static inline int DobbyHook(void *address, void *replace_func, void **origin_func) {
+            A64HookFunction(address, replace_func, origin_func);
+            return 0;
+          }
+          static inline int DobbyHook(void *address, dobby_dummy_func_t replace_func, dobby_dummy_func_t *origin_func) {
+            return DobbyHook(address, (void *)replace_func, (void **)origin_func);
+          }
+          static inline void *DobbySymbolResolver(const char *image_name, const char *symbol_name) {
+            if (!image_name) return dlsym(RTLD_DEFAULT, symbol_name);
+            void *h = dlopen(image_name, RTLD_NOW | RTLD_NOLOAD);
+            if (!h) h = dlopen(image_name, RTLD_NOW);
+            return h ? dlsym(h, symbol_name) : nullptr;
+          }
+          static inline int DobbyDestroy(void *) { return -1; }
           EOF
-          echo "ok=1" >> "$GITHUB_OUTPUT"
 
-      - name: Pick a Dobby revision that builds (fallback)
-        if: steps.pre.outputs.ok != '1'
-        run: |
-          git clone https://github.com/jmpews/Dobby.git third_party_dobby
-          cd third_party_dobby
-          mkdir -p "$RUNNER_TEMP/dobby-logs"
-          OK=0
-          for D in 2025-06-01 2024-12-01 2024-06-01 2023-12-01 2023-06-01 2022-12-01; do
-            REV=$(git rev-list -n1 --before="$D" origin/HEAD || true)
-            [ -z "$REV" ] && continue
-            echo "=== trying $D ($REV)"
-            LOG="$RUNNER_TEMP/dobby-logs/db-$D.log"
-            git reset -q --hard && git clean -qfdx
-            git checkout -q "$REV"
-
-            # arm64 asm: Apple syntax -> ELF syntax
-            for F in $(find source -path "*arm64*" -name "*.asm" 2>/dev/null); do
-              sed -i -E \
-                -e 's/([[:alnum:]_]+(\([[:alnum:]_]+\))?)@PAGEOFF/:lo12:\1/g' \
-                -e 's/@PAGE//g' "$F"
-            done
-
-            # OSMemory fix: os_arch_features.h gets included from dobby/common.h,
-            # which platform.h includes BEFORE it declares OSMemory/kReadExecute.
-            # Fix: drop that include everywhere and add it at the END of platform.h.
-            PUI=$(find . -path '*source/PlatformUnifiedInterface/platform.h' | head -1 || true)
-            OAF=$(find . -name os_arch_features.h | head -1 || true)
-            echo "platform.h: ${PUI:-NOT FOUND}"
-            echo "os_arch_features.h: ${OAF:-NOT FOUND}"
-            echo "--- includers of os_arch_features.h:"
-            grep -rn "os_arch_features.h" source common 2>/dev/null || true
-            if [ -n "$PUI" ] && [ -n "$OAF" ]; then
-              grep -rl "os_arch_features.h" source common 2>/dev/null | while read -r H; do
-                case "$H" in */os_arch_features.h) continue;; esac
-                sed -i '/#include.*os_arch_features\.h/d' "$H"
-              done
-              # absolute path, so it always resolves
-              printf '\n#include "%s/%s"\n' "$PWD" "$OAF" >> "$PUI"
-              echo "--- os_arch_features.h (first 50 lines):"
-              sed -n '1,50p' "$OAF"
-            fi
-
-            rm -rf "$RUNNER_TEMP/db"
-            if cmake -S . -B "$RUNNER_TEMP/db" \
-                 -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
-                 -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
-                 -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release \
-                 -DDOBBY_GENERATE_SHARED=OFF > "$LOG" 2>&1 \
-               && cmake --build "$RUNNER_TEMP/db" --target dobby_static -j"$(nproc)" >> "$LOG" 2>&1; then
-              echo "OK: $D ($REV)"; OK=1; break
-            else
-              echo "failed: $D"
-              grep -m10 -E "error:|fatal error|CMake Error" "$LOG" || tail -n 20 "$LOG"
-              { echo "## $D"; grep -m3 -E "error:|fatal error|CMake Error|No rule to make" "$LOG" | cut -c1-220; } >> "$RUNNER_TEMP/summary.txt"
-            fi
-          done
-          if [ "$OK" != 1 ]; then
-            echo "=================== SUMMARY (1 screen) ==================="
-            cat "$RUNNER_TEMP/summary.txt"
-            echo "No Dobby revision built"; exit 1
-          fi
-          cd ..
-          sed -i 's/PRIVATE dobby log/PRIVATE dobby_static log/' CMakeLists.txt
-
-      - name: Upload Dobby logs (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dobby-logs
-          path: ${{ runner.temp }}/dobby-logs/
+          cat > third_party_dobby/CMakeLists.txt <<'EOF'
+          add_library(dobby STATIC And64InlineHook.cpp)
+          set_target_properties(dobby PROPERTIES POSITION_INDEPENDENT_CODE ON)
+          target_include_directories(dobby PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
+          target_link_libraries(dobby PUBLIC log)
+          add_library(dobby_static ALIAS dobby)
+          EOF
 
       - name: Configure
         run: |
