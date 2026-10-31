@@ -19,7 +19,39 @@ jobs:
           GLSLC=$(find "$NDK/shader-tools" -name glslc -type f | head -1)
           GLSLC="$GLSLC" sh gen_spv.sh
 
-      - name: Pick a Dobby revision that builds
+      - name: Try prebuilt Dobby (official release)
+        id: pre
+        run: |
+          mkdir -p dobby_pre && cd dobby_pre
+          if ! curl -fL --retry 3 -o d.tgz https://github.com/jmpews/Dobby/releases/download/latest/dobby-android-all.tar.gz; then
+            echo "no prebuilt release, will build from source"; exit 0
+          fi
+          tar xzf d.tgz || { echo "bad archive"; exit 0; }
+          find . -type f | head -50
+          RB="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readobj"
+          LIB=""
+          for F in $(find . -name 'libdobby.a'); do
+            if "$RB" --file-headers "$F" 2>/dev/null | grep -qi aarch64; then LIB="$F"; break; fi
+          done
+          HDR=$(find . -name dobby.h | head -1)
+          echo "lib=$LIB hdr=$HDR"
+          [ -n "$LIB" ] && [ -n "$HDR" ] || { echo "no usable arm64 lib"; exit 0; }
+          cd ..
+          mkdir -p third_party_dobby/include
+          cp "dobby_pre/$LIB" third_party_dobby/libdobby.a
+          cp "dobby_pre/$HDR" third_party_dobby/include/dobby.h
+          cat > third_party_dobby/CMakeLists.txt <<'EOF'
+          foreach(T dobby dobby_static)
+            add_library(${T} STATIC IMPORTED GLOBAL)
+            set_target_properties(${T} PROPERTIES
+              IMPORTED_LOCATION "${CMAKE_CURRENT_LIST_DIR}/libdobby.a"
+              INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_LIST_DIR}/include")
+          endforeach()
+          EOF
+          echo "ok=1" >> "$GITHUB_OUTPUT"
+
+      - name: Pick a Dobby revision that builds (fallback)
+        if: steps.pre.outputs.ok != '1'
         run: |
           git clone https://github.com/jmpews/Dobby.git third_party_dobby
           cd third_party_dobby
