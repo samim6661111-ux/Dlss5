@@ -103,9 +103,14 @@ jobs:
             else
               echo "failed: $D"
               grep -m10 -E "error:|fatal error|CMake Error" "$LOG" || tail -n 20 "$LOG"
+              { echo "## $D"; grep -m3 -E "error:|fatal error|CMake Error|No rule to make" "$LOG" | cut -c1-220; } >> "$RUNNER_TEMP/summary.txt"
             fi
           done
-          [ "$OK" = 1 ] || { echo "No Dobby revision built"; exit 1; }
+          if [ "$OK" != 1 ]; then
+            echo "=================== SUMMARY (1 screen) ==================="
+            cat "$RUNNER_TEMP/summary.txt"
+            echo "No Dobby revision built"; exit 1
+          fi
           cd ..
           sed -i 's/PRIVATE dobby log/PRIVATE dobby_static log/' CMakeLists.txt
 
