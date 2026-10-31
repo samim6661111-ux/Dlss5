@@ -62,7 +62,7 @@ static std::map<VkQueue, uint32_t> g_qfam;
 struct Cfg {
     int enabled = 1; float sharpen = 0.5f, contrast = 1.05f, saturation = 1.10f, vignette = 0.12f;
     // dlss5-like mode (dlss5=1 switches to the new shader; 0 = original pass)
-    int dlss5 = 0;
+    int dlss5 = 1;
     float ao = 0.6f, clarity = 0.5f, lift = 0.4f, sheen = 0.4f, warmth = 0.4f, bloom = 0.3f, sat = 1.1f, strength = 0.8f;
 };
 static Cfg g_cfg;
