@@ -19,23 +19,36 @@ jobs:
           GLSLC=$(find "$NDK/shader-tools" -name glslc -type f | head -1)
           GLSLC="$GLSLC" sh gen_spv.sh
 
-      - name: Fetch and patch Dobby
+      - name: Pick a Dobby revision that builds
         run: |
-          git clone --depth 1 https://github.com/jmpews/Dobby.git third_party_dobby
-          for F in $(find third_party_dobby/source -path "*arm64*" -name "*.asm"); do
-            sed -i -E \
-              -e 's/([[:alnum:]_]+(\([[:alnum:]_]+\))?)@PAGEOFF/:lo12:\1/g' \
-              -e 's/@PAGE//g' "$F"
+          git clone https://github.com/jmpews/Dobby.git third_party_dobby
+          cd third_party_dobby
+          OK=0
+          for D in 2025-06-01 2024-12-01 2024-06-01 2023-12-01 2023-06-01 2022-12-01; do
+            REV=$(git rev-list -n1 --before="$D" origin/HEAD || true)
+            [ -z "$REV" ] && continue
+            echo "=== trying $D ($REV)"
+            git reset -q --hard && git clean -qfdx
+            git checkout -q "$REV"
+            for F in $(find source -path "*arm64*" -name "*.asm" 2>/dev/null); do
+              sed -i -E \
+                -e 's/([[:alnum:]_]+(\([[:alnum:]_]+\))?)@PAGEOFF/:lo12:\1/g' \
+                -e 's/@PAGE//g' "$F"
+            done
+            rm -rf "$RUNNER_TEMP/db"
+            if cmake -S . -B "$RUNNER_TEMP/db" \
+                 -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+                 -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+                 -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release \
+                 -DDOBBY_GENERATE_SHARED=OFF > "$RUNNER_TEMP/db.log" 2>&1 \
+               && cmake --build "$RUNNER_TEMP/db" --target dobby_static -j"$(nproc)" >> "$RUNNER_TEMP/db.log" 2>&1; then
+              echo "OK: $D ($REV)"; OK=1; break
+            else
+              echo "failed: $D"; grep -m3 "error" "$RUNNER_TEMP/db.log" || true
+            fi
           done
-          # RuntimeModule field rename: show the struct, then fix ProcessRuntime.cc
-          H=$(grep -rl "struct RuntimeModule" third_party_dobby/source third_party_dobby/include | head -1)
-          echo "RuntimeModule header: $H"
-          grep -n -A8 "struct RuntimeModule" "$H" || true
-          P=third_party_dobby/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc
-          if ! grep -q "load_address" "$H" && grep -qE "[[:space:]]\*?base;" "$H"; then
-            sed -i 's/load_address/base/g' "$P"
-            echo "patched load_address -> base"
-          fi
+          [ "$OK" = 1 ] || { echo "No Dobby revision built"; exit 1; }
+          cd ..
           sed -i 's/PRIVATE dobby log/PRIVATE dobby_static log/' CMakeLists.txt
 
       - name: Configure
