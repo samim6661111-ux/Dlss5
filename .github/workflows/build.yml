@@ -22,9 +22,12 @@ jobs:
       - name: Fetch and patch Dobby
         run: |
           git clone --depth 1 https://github.com/jmpews/Dobby.git third_party_dobby
-          F=third_party_dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm
-          sed -i -e 's/\([A-Za-z0-9_]\+\)@PAGEOFF/:lo12:\1/g' -e 's/@PAGE//g' "$F"
-          grep -n "common_closure_bridge_handler" "$F" || true
+          for F in $(find third_party_dobby/source -path "*arm64*" -name "*.asm"); do
+            sed -i -E \
+              -e 's/([[:alnum:]_]+(\([[:alnum:]_]+\))?)@PAGEOFF/:lo12:\1/g' \
+              -e 's/@PAGE//g' "$F"
+          done
+          grep -rn "lo12\|PAGE" third_party_dobby/source --include=*.asm || true
           sed -i 's/PRIVATE dobby log/PRIVATE dobby_static log/' CMakeLists.txt
 
       - name: Configure
