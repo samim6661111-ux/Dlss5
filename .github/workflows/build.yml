@@ -40,15 +40,22 @@ jobs:
                 -e 's/@PAGE//g' "$F"
             done
 
-            # OSMemory fix: find the header that defines it and include it
-            # at the top of os_arch_features.h
-            OSDEF=$(grep -rlE --include='*.h' --include='*.hpp' "(class|struct)[[:space:]]+OSMemory" . 2>/dev/null | head -1 || true)
-            TARGET=$(find . -name os_arch_features.h | head -1 || true)
-            echo "OSMemory defined in: ${OSDEF:-NOT FOUND}"
-            echo "patching: ${TARGET:-NOT FOUND}"
-            if [ -n "$OSDEF" ] && [ -n "$TARGET" ]; then
-              sed -i "1i #include \"$PWD/$OSDEF\"" "$TARGET"
+            # OSMemory fix: os_arch_features.h gets included from dobby/common.h,
+            # which platform.h includes BEFORE it declares OSMemory/kReadExecute.
+            # Fix: drop that include everywhere and add it at the END of platform.h.
+            PUI=$(find . -path '*source/PlatformUnifiedInterface/platform.h' | head -1 || true)
+            echo "platform.h: ${PUI:-NOT FOUND}"
+            echo "--- includers of os_arch_features.h:"
+            grep -rn "os_arch_features.h" source common 2>/dev/null || true
+            if [ -n "$PUI" ]; then
+              grep -rl "os_arch_features.h" source common 2>/dev/null | while read -r H; do
+                case "$H" in */os_arch_features.h) continue;; esac
+                sed -i '/#include.*os_arch_features\.h/d' "$H"
+              done
+              printf '\n#include "os_arch_features.h"\n' >> "$PUI"
             fi
+            echo "--- os_arch_features.h (first 50 lines):"
+            sed -n '1,50p' "$(find . -name os_arch_features.h | head -1)" || true
 
             rm -rf "$RUNNER_TEMP/db"
             if cmake -S . -B "$RUNNER_TEMP/db" \
