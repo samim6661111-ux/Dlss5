@@ -27,7 +27,15 @@ jobs:
               -e 's/([[:alnum:]_]+(\([[:alnum:]_]+\))?)@PAGEOFF/:lo12:\1/g' \
               -e 's/@PAGE//g' "$F"
           done
-          grep -rn "lo12\|PAGE" third_party_dobby/source --include=*.asm || true
+          # RuntimeModule field rename: show the struct, then fix ProcessRuntime.cc
+          H=$(grep -rl "struct RuntimeModule" third_party_dobby/source third_party_dobby/include | head -1)
+          echo "RuntimeModule header: $H"
+          grep -n -A8 "struct RuntimeModule" "$H" || true
+          P=third_party_dobby/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc
+          if ! grep -q "load_address" "$H" && grep -qE "[[:space:]]\*?base;" "$H"; then
+            sed -i 's/load_address/base/g' "$P"
+            echo "patched load_address -> base"
+          fi
           sed -i 's/PRIVATE dobby log/PRIVATE dobby_static log/' CMakeLists.txt
 
       - name: Configure
