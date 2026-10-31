@@ -23,33 +23,56 @@ jobs:
         run: |
           git clone https://github.com/jmpews/Dobby.git third_party_dobby
           cd third_party_dobby
+          mkdir -p "$RUNNER_TEMP/dobby-logs"
           OK=0
           for D in 2025-06-01 2024-12-01 2024-06-01 2023-12-01 2023-06-01 2022-12-01; do
             REV=$(git rev-list -n1 --before="$D" origin/HEAD || true)
             [ -z "$REV" ] && continue
             echo "=== trying $D ($REV)"
+            LOG="$RUNNER_TEMP/dobby-logs/db-$D.log"
             git reset -q --hard && git clean -qfdx
             git checkout -q "$REV"
+
+            # arm64 asm: Apple syntax -> ELF syntax
             for F in $(find source -path "*arm64*" -name "*.asm" 2>/dev/null); do
               sed -i -E \
                 -e 's/([[:alnum:]_]+(\([[:alnum:]_]+\))?)@PAGEOFF/:lo12:\1/g' \
                 -e 's/@PAGE//g' "$F"
             done
+
+            # OSMemory fix: find the header that defines it and include it
+            # at the top of os_arch_features.h
+            OSDEF=$(grep -rlE --include='*.h' --include='*.hpp' "(class|struct)[[:space:]]+OSMemory" . 2>/dev/null | head -1 || true)
+            TARGET=$(find . -name os_arch_features.h | head -1 || true)
+            echo "OSMemory defined in: ${OSDEF:-NOT FOUND}"
+            echo "patching: ${TARGET:-NOT FOUND}"
+            if [ -n "$OSDEF" ] && [ -n "$TARGET" ]; then
+              sed -i "1i #include \"$PWD/$OSDEF\"" "$TARGET"
+            fi
+
             rm -rf "$RUNNER_TEMP/db"
             if cmake -S . -B "$RUNNER_TEMP/db" \
                  -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
                  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
                  -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release \
-                 -DDOBBY_GENERATE_SHARED=OFF > "$RUNNER_TEMP/db.log" 2>&1 \
-               && cmake --build "$RUNNER_TEMP/db" --target dobby_static -j"$(nproc)" >> "$RUNNER_TEMP/db.log" 2>&1; then
+                 -DDOBBY_GENERATE_SHARED=OFF > "$LOG" 2>&1 \
+               && cmake --build "$RUNNER_TEMP/db" --target dobby_static -j"$(nproc)" >> "$LOG" 2>&1; then
               echo "OK: $D ($REV)"; OK=1; break
             else
-              echo "failed: $D"; grep -m3 "error" "$RUNNER_TEMP/db.log" || true
+              echo "failed: $D"
+              grep -m10 -B1 -A4 "error" "$LOG" || true
             fi
           done
           [ "$OK" = 1 ] || { echo "No Dobby revision built"; exit 1; }
           cd ..
           sed -i 's/PRIVATE dobby log/PRIVATE dobby_static log/' CMakeLists.txt
+
+      - name: Upload Dobby logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dobby-logs
+          path: ${{ runner.temp }}/dobby-logs/
 
       - name: Configure
         run: |
